@@ -210,12 +210,10 @@ body {
   white-space: nowrap;
 }
 .chip.selected { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.chip.chip-other { border-style: dashed; color: var(--text-muted); }
+.chip.chip-other.selected { border-style: solid; color: #fff; }
 
-.option-manage-row { display: flex; gap: 6px; margin-top: 6px; }
-.option-manage-row input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; }
-.option-manage-row button { flex-shrink: 0; padding: 8px 12px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 13px; }
-.option-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
-.option-list .chip { cursor: default; font-size: 12.5px; padding: 5px 10px; }
+.other-input { margin-top: 6px; }
 
 .install-steps { font-size: 13px; line-height: 1.7; }
 .install-steps b { color: var(--accent); }

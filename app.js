@@ -13,6 +13,7 @@ let state = {
   lastPullTime: '',
   categories: DEFAULT_CATEGORIES,
   methods: DEFAULT_METHODS,
+  pendingOptions: [], // [{field:'category'|'method', value}] typed via the "✏️ 自訂" chip, waiting to sync to the sheet's dropdown
   syncing: false,
 };
 
@@ -86,10 +87,41 @@ async function loadMeta() {
     if (r.key === 'lastPullTime') state.lastPullTime = r.value;
     if (r.key === 'categories' && r.value && r.value.length) state.categories = r.value;
     if (r.key === 'methods' && r.value && r.value.length) state.methods = r.value;
+    if (r.key === 'pendingOptions' && Array.isArray(r.value)) state.pendingOptions = r.value;
   }
 }
 function saveMeta(key, value) {
   return idbPut(STORE_META, { key, value });
+}
+
+/* ---------- custom category/method entered via the "✏️ 自訂" chip ---------- */
+// Adds the value to the local chip list immediately (so it's usable right away,
+// even offline) and queues it to be written into the sheet's dropdown list on
+// the next successful sync.
+async function registerCustomOption(field, value) {
+  const list = field === 'category' ? state.categories : state.methods;
+  if (list.includes(value)) return;
+  list.push(value);
+  await saveMeta(field === 'category' ? 'categories' : 'methods', list);
+  if (!state.pendingOptions.some((o) => o.field === field && o.value === value)) {
+    state.pendingOptions.push({ field, value });
+    await saveMeta('pendingOptions', state.pendingOptions);
+  }
+}
+
+async function pushPendingOptions() {
+  if (!state.pendingOptions.length) return;
+  const remaining = [];
+  for (const opt of state.pendingOptions) {
+    try {
+      await callSync('addOption', opt);
+    } catch (e) {
+      console.error('addOption sync failed, will retry later', e);
+      remaining.push(opt);
+    }
+  }
+  state.pendingOptions = remaining;
+  await saveMeta('pendingOptions', remaining);
 }
 
 /* ---------- expense CRUD (local-first) ---------- */
@@ -165,7 +197,7 @@ function setSyncBadge(text, cls) {
 
 async function updateSyncBadge() {
   const rows = await idbGetAll(STORE_EXPENSES);
-  const pendingCount = rows.filter((r) => r.syncStatus && r.syncStatus.startsWith('pending')).length;
+  const pendingCount = rows.filter((r) => r.syncStatus && r.syncStatus.startsWith('pending')).length + state.pendingOptions.length;
   $('#offlineBanner').classList.toggle('show', !navigator.onLine);
   if (state.syncing) { setSyncBadge('🔄 同步中…', 'syncing'); return; }
   if (!state.syncUrl) { setSyncBadge('⚙️ 尚未設定同步', ''); return; }
@@ -183,6 +215,7 @@ async function runSync() {
   await updateSyncBadge();
   try {
     await pullFromSheet();
+    await pushPendingOptions();
     await pushPendingToSheet();
   } catch (e) {
     console.error('sync failed', e);
@@ -259,7 +292,6 @@ async function renderAll() {
   const rows = await getAllExpenses();
   renderSummary(rows);
   renderList(rows);
-  renderOptionLists();
   await updateSyncBadge();
 }
 
@@ -322,19 +354,39 @@ function todayStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+const CUSTOM_CHIP_SENTINEL = '__custom__';
+
 function chipGroupHtml(name, options, selected) {
-  return `<div class="chip-group" id="${name}Chips" data-value="${escapeHtml(selected || '')}">` +
-    options.map((o) => `<button type="button" class="chip ${o === selected ? 'selected' : ''}" data-value="${escapeHtml(o)}">${escapeHtml(o)}</button>`).join('') +
-    '</div>';
+  const isCustom = !!selected && !options.includes(selected);
+  const groupValue = isCustom ? CUSTOM_CHIP_SENTINEL : (selected || '');
+  const chips = options.map((o) => `<button type="button" class="chip ${o === selected ? 'selected' : ''}" data-value="${escapeHtml(o)}">${escapeHtml(o)}</button>`).join('');
+  const otherLabel = name === 'category' ? '分類' : '付款方式';
+  const otherChip = `<button type="button" class="chip chip-other ${isCustom ? 'selected' : ''}" data-other="1">✏️ 自訂</button>`;
+  const otherInput = `<input type="text" id="${name}OtherInput" class="other-input" placeholder="輸入自訂${otherLabel}" value="${isCustom ? escapeHtml(selected) : ''}" style="display:${isCustom ? 'block' : 'none'}">`;
+  return `<div class="chip-group" id="${name}Chips" data-value="${escapeHtml(groupValue)}">${chips}${otherChip}</div>${otherInput}`;
 }
 function wireChipGroup(name) {
   const group = $(`#${name}Chips`);
+  const otherInput = $(`#${name}OtherInput`);
   group.addEventListener('click', (e) => {
     const btn = e.target.closest('.chip');
     if (!btn) return;
-    group.dataset.value = btn.dataset.value;
     group.querySelectorAll('.chip').forEach((c) => c.classList.toggle('selected', c === btn));
+    if (btn.dataset.other) {
+      group.dataset.value = CUSTOM_CHIP_SENTINEL;
+      otherInput.style.display = 'block';
+      otherInput.focus();
+    } else {
+      group.dataset.value = btn.dataset.value;
+      otherInput.style.display = 'none';
+      otherInput.value = '';
+    }
   });
+}
+function resolveChipValue(name) {
+  const group = $(`#${name}Chips`);
+  if (group.dataset.value === CUSTOM_CHIP_SENTINEL) return $(`#${name}OtherInput`).value.trim();
+  return group.dataset.value;
 }
 
 async function openExpenseModal(localId) {
@@ -403,16 +455,23 @@ async function openExpenseModal(localId) {
     // actualCardTWD is intentionally not collected here — it's filled in later
     // during desktop reconciliation directly in the sheet, and updateExpense
     // preserves whatever value is already on the local record.
+    const category = resolveChipValue('category');
+    const method = resolveChipValue('method');
     const fields = {
       date: $('#f_date').value,
-      category: $('#categoryChips').dataset.value,
-      method: $('#methodChips').dataset.value,
+      category,
+      method,
       item: $('#f_item').value.trim(),
       amountUSD: $('#f_usd').value === '' ? null : Number($('#f_usd').value),
       amountTWD: $('#f_twd').value === '' ? null : Number($('#f_twd').value),
       note: $('#f_note').value.trim(),
     };
-    if (!fields.date || !fields.item) { showToast('請至少填日期和項目名稱'); return; }
+    if (!fields.date || !fields.item || !category || !method) { showToast('請至少填日期、項目名稱、分類和付款方式'); return; }
+    // Registering is a no-op if the value already exists in the known list;
+    // for a genuinely new value it updates the chip list right away and
+    // queues it to sync into the sheet's dropdown on the next successful sync.
+    await registerCustomOption('category', category);
+    await registerCustomOption('method', method);
     if (isEdit) await updateExpense(localId, fields);
     else await addExpense(fields);
     closeModal();
@@ -458,48 +517,12 @@ function wireTabs() {
   document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 }
 
-/* ---------- category/method option management ---------- */
-function renderOptionLists() {
-  $('#categoryOptionList').innerHTML = state.categories.map((c) => `<span class="chip">${escapeHtml(c)}</span>`).join('');
-  $('#methodOptionList').innerHTML = state.methods.map((m) => `<span class="chip">${escapeHtml(m)}</span>`).join('');
-}
-
-async function addOption(field, value) {
-  if (!state.syncUrl) { showToast('請先設定雲端同步網址'); return; }
-  if (!navigator.onLine) { showToast('新增分類/付款方式需要連線'); return; }
-  const trimmed = value.trim();
-  if (!trimmed) return;
-  try {
-    const res = await callSync('addOption', { field, value: trimmed });
-    if (field === 'category' && res.categories) { state.categories = res.categories; await saveMeta('categories', res.categories); }
-    if (field === 'method' && res.methods) { state.methods = res.methods; await saveMeta('methods', res.methods); }
-    renderOptionLists();
-    showToast('已新增並同步到試算表');
-  } catch (e) {
-    console.error('addOption failed', e);
-    showToast('新增失敗：' + e.message);
-  }
-}
-
-function wireOptionManagement() {
-  renderOptionLists();
-  $('#addCategoryBtn').addEventListener('click', async () => {
-    await addOption('category', $('#newCategoryInput').value);
-    $('#newCategoryInput').value = '';
-  });
-  $('#addMethodBtn').addEventListener('click', async () => {
-    await addOption('method', $('#newMethodInput').value);
-    $('#newMethodInput').value = '';
-  });
-}
-
 /* ---------- init ---------- */
 async function init() {
   db = await openDB();
   await loadMeta();
   wireSettings();
   wireTabs();
-  wireOptionManagement();
   $('#addFab').addEventListener('click', () => openExpenseModal(null));
   $('#syncBadge').addEventListener('click', () => {
     if (state.syncUrl) runSync();

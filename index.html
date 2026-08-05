@@ -128,18 +128,13 @@
           });
         }
       }
-      return json_({ status: 'ok', rows: rows, serverTime: now });
+      var opts = getDropdownOptions_(sheet);
+      return json_({ status: 'ok', rows: rows, serverTime: now, categories: opts.categories, methods: opts.methods });
     }
 
     if (action === 'meta') {
-      var headers = sheet.getRange(1, 1, 1, 8).getValues()[0];
-      var catCol = findCol_(headers, '大項目');
-      var methodCol = findCol_(headers, '支付方式');
-      return json_({
-        status: 'ok',
-        categories: catCol > 0 ? getListValidationValues_(sheet, catCol) : [],
-        methods: methodCol > 0 ? getListValidationValues_(sheet, methodCol) : []
-      });
+      var opts2 = getDropdownOptions_(sheet);
+      return json_({ status: 'ok', categories: opts2.categories, methods: opts2.methods });
     }
 
     if (action === 'addOption') {
@@ -171,6 +166,16 @@ function findCol_(headers, keyword) {
     if (String(headers[i]).indexOf(keyword) !== -1) return i + 1;
   }
   return -1;
+}
+
+function getDropdownOptions_(sheet) {
+  var headers = sheet.getRange(1, 1, 1, 8).getValues()[0];
+  var catCol = findCol_(headers, '大項目');
+  var methodCol = findCol_(headers, '支付方式');
+  return {
+    categories: catCol > 0 ? getListValidationValues_(sheet, catCol) : [],
+    methods: methodCol > 0 ? getListValidationValues_(sheet, methodCol) : []
+  };
 }
 
 function getListValidationValues_(sheet, col) {
@@ -211,27 +216,6 @@ function doGet(e) {
             <li>之後每次改這段程式碼，記得「管理部署作業」→ 編輯 → 選新版本，否則舊程式碼還在跑。</li>
           </ol>
         </details>
-      </div>
-
-      <div class="card" id="optionManageCard">
-        <h2>🏷️ 分類 / 付款方式管理</h2>
-        <p class="hint">在這裡新增的選項會直接寫回試算表的下拉選單，需要連線才能操作。</p>
-        <div class="form-row">
-          <label>大項目（分類）</label>
-          <div class="option-list" id="categoryOptionList"></div>
-          <div class="option-manage-row">
-            <input type="text" id="newCategoryInput" placeholder="例如：🎓 學費">
-            <button id="addCategoryBtn">新增</button>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>支付方式</label>
-          <div class="option-list" id="methodOptionList"></div>
-          <div class="option-manage-row">
-            <input type="text" id="newMethodInput" placeholder="例如：Apple Pay">
-            <button id="addMethodBtn">新增</button>
-          </div>
-        </div>
       </div>
 
       <div class="card">
