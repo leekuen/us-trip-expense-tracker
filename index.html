@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>美國記帳</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#2c6e63">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="topbar">
+    <h1>💵 美國記帳</h1>
+    <button id="syncBadge" class="sync-badge">初始化中…</button>
+  </div>
+
+  <div id="app">
+    <div class="card">
+      <h2>總計</h2>
+      <div class="summary-grid">
+        <div>
+          <div class="total-label">美金 USD</div>
+          <div class="total-value" id="totalUSD">$0</div>
+        </div>
+        <div>
+          <div class="total-label">台幣 TWD</div>
+          <div class="total-value" id="totalTWD">NT$0</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="expenseList"></div>
+
+    <div class="card" id="settingsCard">
+      <h2>⚙️ 雲端同步設定</h2>
+      <p class="hint">設定後，記帳會自動同步到 Google 試算表「記帳」分頁。離線時新增/編輯/刪除都會先存在手機上，恢復連線後自動補同步。</p>
+      <div class="form-row">
+        <label>Apps Script Web App 網址</label>
+        <input id="syncUrlInput" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+      </div>
+      <button class="btn-primary" id="saveSyncUrlBtn">儲存並立即同步</button>
+      <button class="btn-secondary" id="manualSyncBtn">🔄 手動同步</button>
+      <div class="hint" id="syncResult"></div>
+
+      <details class="howto">
+        <summary>還沒設定？點我看一次性設定步驟</summary>
+        <ol>
+          <li>打開你的 Google 試算表 →上方選單「擴充功能」→「Apps Script」。</li>
+          <li>把編輯器裡原本的程式碼全部刪掉，貼上下面這段程式碼：</li>
+        </ol>
+        <div class="code-block-wrap">
+          <button class="btn-secondary copy-btn" id="copyAppsScriptBtn">📋 複製程式碼</button>
+          <pre id="appsScriptCode" class="code-block">function doPost(e) {
+  try {
+    var payload = JSON.parse(e.postData.contents);
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
+    if (!sheet) throw new Error('找不到「記帳」分頁');
+    ensureLastModifiedColumn_(sheet);
+    var action = payload.action || 'create';
+    var d = payload.data || {};
+    var now = new Date().toISOString();
+
+    if (action === 'create') {
+      sheet.appendRow([
+        d.date || '', d.category || '', d.item || '', d.method || '',
+        d.amountUSD != null ? d.amountUSD : '',
+        d.amountTWD != null ? d.amountTWD : '',
+        d.note || '',
+        d.actualCardTWD != null ? d.actualCardTWD : '',
+        d.lastModified || now
+      ]);
+      return json_({ status: 'ok', row: sheet.getLastRow(), lastModified: d.lastModified || now });
+    }
+
+    if (action === 'update') {
+      if (!payload.row) throw new Error('缺少 row');
+      sheet.getRange(payload.row, 1, 1, 9).setValues([[
+        d.date || '', d.category || '', d.item || '', d.method || '',
+        d.amountUSD != null ? d.amountUSD : '',
+        d.amountTWD != null ? d.amountTWD : '',
+        d.note || '',
+        d.actualCardTWD != null ? d.actualCardTWD : '',
+        d.lastModified || now
+      ]]);
+      return json_({ status: 'ok' });
+    }
+
+    if (action === 'delete') {
+      if (!payload.row) throw new Error('缺少 row');
+      sheet.getRange(payload.row, 1, 1, 8).clearContent();
+      sheet.getRange(payload.row, 9).setValue(d.lastModified || now);
+      return json_({ status: 'ok' });
+    }
+
+    if (action === 'pull') {
+      var since = payload.since || '';
+      var lastRow = sheet.getLastRow();
+      var rows = [];
+      if (lastRow >= 2) {
+        var values = sheet.getRange(2, 1, lastRow - 1, 9).getValues();
+        for (var i = 0; i < values.length; i++) {
+          var row = values[i];
+          var rowNum = i + 2;
+          var hasData = row[0] || row[1] || row[2] || row[3] || row[4] !== '' || row[5] !== '' || row[6] || row[7] !== '';
+          var lm = row[8];
+          var lmStr = lm instanceof Date ? lm.toISOString() : String(lm || '').trim();
+          if (!lmStr && hasData) {
+            lmStr = now;
+            sheet.getRange(rowNum, 9).setValue(lmStr);
+          }
+          if (!lmStr) continue;
+          if (since && lmStr <= since) continue;
+          rows.push({
+            row: rowNum,
+            deleted: !hasData,
+            lastModified: lmStr,
+            data: {
+              date: row[0], category: row[1], item: row[2], method: row[3],
+              amountUSD: row[4], amountTWD: row[5], note: row[6], actualCardTWD: row[7]
+            }
+          });
+        }
+      }
+      return json_({ status: 'ok', rows: rows, serverTime: now });
+    }
+
+    if (action === 'meta') {
+      var headers = sheet.getRange(1, 1, 1, 8).getValues()[0];
+      var catCol = findCol_(headers, '大項目');
+      var methodCol = findCol_(headers, '支付方式');
+      return json_({
+        status: 'ok',
+        categories: catCol > 0 ? getListValidationValues_(sheet, catCol) : [],
+        methods: methodCol > 0 ? getListValidationValues_(sheet, methodCol) : []
+      });
+    }
+
+    throw new Error('未知的 action: ' + action);
+  } catch (err) {
+    return json_({ status: 'error', message: err.message });
+  }
+}
+
+function findCol_(headers, keyword) {
+  for (var i = 0; i < headers.length; i++) {
+    if (String(headers[i]).indexOf(keyword) !== -1) return i + 1;
+  }
+  return -1;
+}
+
+function getListValidationValues_(sheet, col) {
+  var rule = sheet.getRange(2, col).getDataValidation();
+  if (!rule) return [];
+  var criteria = rule.getCriteriaType();
+  var values = rule.getCriteriaValues();
+  if (criteria == SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+    return values[0];
+  }
+  if (criteria == SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE) {
+    return values[0].getValues().reduce(function (a, b) { return a.concat(b); }, []).filter(String);
+  }
+  return [];
+}
+
+function ensureLastModifiedColumn_(sheet) {
+  var header = sheet.getRange(1, 9).getValue();
+  if (!header) sheet.getRange(1, 9).setValue('最後修改時間（同步用，勿刪）');
+}
+
+function json_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function doGet(e) {
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
+  return ContentService.createTextOutput(
+    '✅ 記帳連動已就緒，目前列數：' + (sheet ? sheet.getLastRow() : '找不到「記帳」分頁')
+  );
+}</pre>
+        </div>
+        <ol start="3">
+          <li>按左上角磁碟片圖示存檔。</li>
+          <li>右上角「部署」→「新增部署作業」→ 齒輪圖示選「網頁應用程式」。</li>
+          <li>執行身分選「我」，這樣「誰可以存取」才會出現「所有人」選項，務必選「所有人」。</li>
+          <li>按「部署」，授權後複製 Web App 網址（結尾是 <code>/exec</code>），貼到上方輸入框存起來。</li>
+          <li>之後每次改這段程式碼，記得「管理部署作業」→ 編輯 → 選新版本，否則舊程式碼還在跑。</li>
+        </ol>
+      </details>
+
+      <div class="checkbox-row">
+        <input type="checkbox" id="clearLocalCheckbox">
+        <label for="clearLocalCheckbox">我了解，清除本機資料前请先確認已同步</label>
+      </div>
+      <button class="btn-danger" id="clearLocalBtn">清除本機所有記帳資料</button>
+    </div>
+  </div>
+
+  <button class="add-fab" id="addFab">＋</button>
+  <div id="modalRoot"></div>
+  <div id="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
