@@ -48,7 +48,43 @@ body {
 .sync-badge.offline { background: rgba(0,0,0,0.25); }
 .sync-badge.syncing { background: rgba(255,255,255,0.35); }
 
+.offline-banner {
+  background: #4a4a4a;
+  color: #fff;
+  font-size: 13px;
+  text-align: center;
+  padding: 8px 12px;
+  display: none;
+}
+.offline-banner.show { display: block; }
+
 #app { max-width: 640px; margin: 0 auto; padding: 12px; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.bottom-nav {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  display: flex;
+  background: #fff;
+  border-top: 1px solid var(--border);
+  z-index: 30;
+}
+.nav-btn {
+  flex: 1;
+  border: none;
+  background: none;
+  padding: 8px 0 6px;
+  font-size: 20px;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.nav-btn span { font-size: 11px; }
+.nav-btn.active { color: var(--accent); font-weight: 600; }
 
 .card {
   background: var(--card-bg);
@@ -161,6 +197,31 @@ body {
 .form-row textarea { min-height: 50px; }
 .form-row-split { display: flex; gap: 8px; }
 .form-row-split .form-row { flex: 1; }
+
+.chip-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--text);
+  border-radius: 20px;
+  padding: 8px 14px;
+  font-size: 13.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip.selected { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+
+.option-manage-row { display: flex; gap: 6px; margin-top: 6px; }
+.option-manage-row input { flex: 1; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); font-size: 13px; }
+.option-manage-row button { flex-shrink: 0; padding: 8px 12px; border-radius: 8px; border: none; background: var(--accent); color: #fff; font-size: 13px; }
+.option-list { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.option-list .chip { cursor: default; font-size: 12.5px; padding: 5px 10px; }
+
+.install-steps { font-size: 13px; line-height: 1.7; }
+.install-steps b { color: var(--accent); }
+.install-steps code { background: var(--accent-light); padding: 1px 5px; border-radius: 4px; }
+
+.danger-card { border-color: #f1c4be; }
 .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
 .modal-actions button { flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px; }
 .modal-actions .save-btn { background: var(--accent); color: #fff; }

@@ -14,44 +14,48 @@
     <h1>💵 美國記帳</h1>
     <button id="syncBadge" class="sync-badge">初始化中…</button>
   </div>
+  <div class="offline-banner" id="offlineBanner">📴 目前離線,記帳會先存在手機上,恢復連線後自動同步</div>
 
   <div id="app">
-    <div class="card">
-      <h2>總計</h2>
-      <div class="summary-grid">
-        <div>
-          <div class="total-label">美金 USD</div>
-          <div class="total-value" id="totalUSD">$0</div>
-        </div>
-        <div>
-          <div class="total-label">台幣 TWD</div>
-          <div class="total-value" id="totalTWD">NT$0</div>
+    <div class="tab-panel active" id="tab-record">
+      <div class="card">
+        <h2>總計</h2>
+        <div class="summary-grid">
+          <div>
+            <div class="total-label">美金 USD</div>
+            <div class="total-value" id="totalUSD">$0</div>
+          </div>
+          <div>
+            <div class="total-label">台幣 TWD</div>
+            <div class="total-value" id="totalTWD">NT$0</div>
+          </div>
         </div>
       </div>
+
+      <div id="expenseList"></div>
     </div>
 
-    <div id="expenseList"></div>
+    <div class="tab-panel" id="tab-settings">
+      <div class="card" id="settingsCard">
+        <h2>⚙️ 雲端同步設定</h2>
+        <p class="hint">設定後，記帳會自動同步到 Google 試算表「記帳」分頁。離線時新增/編輯/刪除都會先存在手機上，恢復連線後自動補同步。</p>
+        <div class="form-row">
+          <label>Apps Script Web App 網址</label>
+          <input id="syncUrlInput" type="url" placeholder="https://script.google.com/macros/s/.../exec">
+        </div>
+        <button class="btn-primary" id="saveSyncUrlBtn">儲存並立即同步</button>
+        <button class="btn-secondary" id="manualSyncBtn">🔄 手動同步</button>
+        <div class="hint" id="syncResult"></div>
 
-    <div class="card" id="settingsCard">
-      <h2>⚙️ 雲端同步設定</h2>
-      <p class="hint">設定後，記帳會自動同步到 Google 試算表「記帳」分頁。離線時新增/編輯/刪除都會先存在手機上，恢復連線後自動補同步。</p>
-      <div class="form-row">
-        <label>Apps Script Web App 網址</label>
-        <input id="syncUrlInput" type="url" placeholder="https://script.google.com/macros/s/.../exec">
-      </div>
-      <button class="btn-primary" id="saveSyncUrlBtn">儲存並立即同步</button>
-      <button class="btn-secondary" id="manualSyncBtn">🔄 手動同步</button>
-      <div class="hint" id="syncResult"></div>
-
-      <details class="howto">
-        <summary>還沒設定？點我看一次性設定步驟</summary>
-        <ol>
-          <li>打開你的 Google 試算表 →上方選單「擴充功能」→「Apps Script」。</li>
-          <li>把編輯器裡原本的程式碼全部刪掉，貼上下面這段程式碼：</li>
-        </ol>
-        <div class="code-block-wrap">
-          <button class="btn-secondary copy-btn" id="copyAppsScriptBtn">📋 複製程式碼</button>
-          <pre id="appsScriptCode" class="code-block">function doPost(e) {
+        <details class="howto">
+          <summary>還沒設定？點我看一次性設定步驟</summary>
+          <ol>
+            <li>打開你的 Google 試算表 →上方選單「擴充功能」→「Apps Script」。</li>
+            <li>把編輯器裡原本的程式碼全部刪掉，貼上下面這段程式碼：</li>
+          </ol>
+          <div class="code-block-wrap">
+            <button class="btn-secondary copy-btn" id="copyAppsScriptBtn">📋 複製程式碼</button>
+            <pre id="appsScriptCode" class="code-block">function doPost(e) {
   try {
     var payload = JSON.parse(e.postData.contents);
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
@@ -75,6 +79,8 @@
 
     if (action === 'update') {
       if (!payload.row) throw new Error('缺少 row');
+      // 只更新前 8 欄，不動「實際刷卡台幣金額」以外的東西已在 App 端排除，
+      // 但仍整列連同該欄一起寫回，讓電腦端已填的對帳金額不會消失。
       sheet.getRange(payload.row, 1, 1, 9).setValues([[
         d.date || '', d.category || '', d.item || '', d.method || '',
         d.amountUSD != null ? d.amountUSD : '',
@@ -136,6 +142,24 @@
       });
     }
 
+    if (action === 'addOption') {
+      var field = payload.field; // 'category' | 'method'
+      var newValue = String(payload.value || '').trim();
+      if (!newValue) throw new Error('缺少要新增的值');
+      var headers2 = sheet.getRange(1, 1, 1, 8).getValues()[0];
+      var col = findCol_(headers2, field === 'category' ? '大項目' : '支付方式');
+      if (col < 1) throw new Error('找不到欄位');
+      var rule2 = sheet.getRange(2, col).getDataValidation();
+      if (!rule2 || rule2.getCriteriaType() != SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+        throw new Error('這個欄位的下拉選單不是簡單清單型態，請直接到試算表「資料 > 資料驗證」手動加選項');
+      }
+      var existing = rule2.getCriteriaValues()[0];
+      if (existing.indexOf(newValue) === -1) existing.push(newValue);
+      var newRule = SpreadsheetApp.newDataValidation().requireValueInList(existing, true).build();
+      sheet.getRange(2, col, sheet.getMaxRows() - 1, 1).setDataValidation(newRule);
+      return json_({ status: 'ok', categories: field === 'category' ? existing : undefined, methods: field === 'method' ? existing : undefined });
+    }
+
     throw new Error('未知的 action: ' + action);
   } catch (err) {
     return json_({ status: 'error', message: err.message });
@@ -178,25 +202,64 @@ function doGet(e) {
     '✅ 記帳連動已就緒，目前列數：' + (sheet ? sheet.getLastRow() : '找不到「記帳」分頁')
   );
 }</pre>
-        </div>
-        <ol start="3">
-          <li>按左上角磁碟片圖示存檔。</li>
-          <li>右上角「部署」→「新增部署作業」→ 齒輪圖示選「網頁應用程式」。</li>
-          <li>執行身分選「我」，這樣「誰可以存取」才會出現「所有人」選項，務必選「所有人」。</li>
-          <li>按「部署」，授權後複製 Web App 網址（結尾是 <code>/exec</code>），貼到上方輸入框存起來。</li>
-          <li>之後每次改這段程式碼，記得「管理部署作業」→ 編輯 → 選新版本，否則舊程式碼還在跑。</li>
-        </ol>
-      </details>
-
-      <div class="checkbox-row">
-        <input type="checkbox" id="clearLocalCheckbox">
-        <label for="clearLocalCheckbox">我了解，清除本機資料前请先確認已同步</label>
+          </div>
+          <ol start="3">
+            <li>按左上角磁碟片圖示存檔。</li>
+            <li>右上角「部署」→「新增部署作業」→ 齒輪圖示選「網頁應用程式」。</li>
+            <li>執行身分選「我」，這樣「誰可以存取」才會出現「所有人」選項，務必選「所有人」。</li>
+            <li>按「部署」，授權後複製 Web App 網址（結尾是 <code>/exec</code>），貼到上方輸入框存起來。</li>
+            <li>之後每次改這段程式碼，記得「管理部署作業」→ 編輯 → 選新版本，否則舊程式碼還在跑。</li>
+          </ol>
+        </details>
       </div>
-      <button class="btn-danger" id="clearLocalBtn">清除本機所有記帳資料</button>
+
+      <div class="card" id="optionManageCard">
+        <h2>🏷️ 分類 / 付款方式管理</h2>
+        <p class="hint">在這裡新增的選項會直接寫回試算表的下拉選單，需要連線才能操作。</p>
+        <div class="form-row">
+          <label>大項目（分類）</label>
+          <div class="option-list" id="categoryOptionList"></div>
+          <div class="option-manage-row">
+            <input type="text" id="newCategoryInput" placeholder="例如：🎓 學費">
+            <button id="addCategoryBtn">新增</button>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>支付方式</label>
+          <div class="option-list" id="methodOptionList"></div>
+          <div class="option-manage-row">
+            <input type="text" id="newMethodInput" placeholder="例如：Apple Pay">
+            <button id="addMethodBtn">新增</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>📲 加到手機主畫面</h2>
+        <div class="install-steps">
+          <p><b>iPhone（Safari）：</b>打開這個網址 → 點下方分享圖示 <code>⬆️</code> → 選「加入主畫面」→ 完成後桌面會有一個圖示，點開就像 App 一樣全螢幕、沒有網址列。</p>
+          <p><b>Android（Chrome）：</b>打開這個網址 → 右上角選單 <code>⋮</code> → 選「新增至主畫面」或「安裝應用程式」。</p>
+        </div>
+      </div>
+
+      <div class="card danger-card">
+        <h2>⚠️ 危險操作</h2>
+        <div class="checkbox-row">
+          <input type="checkbox" id="clearLocalCheckbox">
+          <label for="clearLocalCheckbox">我了解，清除本機資料前请先確認已同步</label>
+        </div>
+        <button class="btn-danger" id="clearLocalBtn">清除本機所有記帳資料</button>
+      </div>
     </div>
   </div>
 
   <button class="add-fab" id="addFab">＋</button>
+
+  <div class="bottom-nav">
+    <button class="nav-btn active" data-tab="tab-record"><span>📝</span><span>記帳</span></button>
+    <button class="nav-btn" data-tab="tab-settings"><span>⚙️</span><span>設定</span></button>
+  </div>
+
   <div id="modalRoot"></div>
   <div id="toast"></div>
 

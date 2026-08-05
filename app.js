@@ -166,6 +166,7 @@ function setSyncBadge(text, cls) {
 async function updateSyncBadge() {
   const rows = await idbGetAll(STORE_EXPENSES);
   const pendingCount = rows.filter((r) => r.syncStatus && r.syncStatus.startsWith('pending')).length;
+  $('#offlineBanner').classList.toggle('show', !navigator.onLine);
   if (state.syncing) { setSyncBadge('🔄 同步中…', 'syncing'); return; }
   if (!state.syncUrl) { setSyncBadge('⚙️ 尚未設定同步', ''); return; }
   if (!navigator.onLine) { setSyncBadge(pendingCount ? `📴 離線・待同步 ${pendingCount}` : '📴 離線', 'offline'); return; }
@@ -258,6 +259,7 @@ async function renderAll() {
   const rows = await getAllExpenses();
   renderSummary(rows);
   renderList(rows);
+  renderOptionLists();
   await updateSyncBadge();
 }
 
@@ -320,6 +322,21 @@ function todayStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function chipGroupHtml(name, options, selected) {
+  return `<div class="chip-group" id="${name}Chips" data-value="${escapeHtml(selected || '')}">` +
+    options.map((o) => `<button type="button" class="chip ${o === selected ? 'selected' : ''}" data-value="${escapeHtml(o)}">${escapeHtml(o)}</button>`).join('') +
+    '</div>';
+}
+function wireChipGroup(name) {
+  const group = $(`#${name}Chips`);
+  group.addEventListener('click', (e) => {
+    const btn = e.target.closest('.chip');
+    if (!btn) return;
+    group.dataset.value = btn.dataset.value;
+    group.querySelectorAll('.chip').forEach((c) => c.classList.toggle('selected', c === btn));
+  });
+}
+
 async function openExpenseModal(localId) {
   let rec = null;
   if (localId) {
@@ -327,8 +344,8 @@ async function openExpenseModal(localId) {
     rec = rows.find((r) => r.localId === localId);
   }
   const isEdit = !!rec;
-  const catOptions = state.categories.map((c) => `<option value="${escapeHtml(c)}" ${rec && rec.category === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('');
-  const methodOptions = state.methods.map((m) => `<option value="${escapeHtml(m)}" ${rec && rec.method === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('');
+  const selectedCategory = rec ? rec.category : state.categories[0];
+  const selectedMethod = rec ? rec.method : state.methods[0];
 
   const root = $('#modalRoot');
   root.innerHTML = `
@@ -339,15 +356,13 @@ async function openExpenseModal(localId) {
           <label>日期</label>
           <input type="date" id="f_date" value="${rec ? rec.date : todayStr()}">
         </div>
-        <div class="form-row-split">
-          <div class="form-row">
-            <label>大項目</label>
-            <select id="f_category">${catOptions}</select>
-          </div>
-          <div class="form-row">
-            <label>支付方式</label>
-            <select id="f_method">${methodOptions}</select>
-          </div>
+        <div class="form-row">
+          <label>大項目</label>
+          ${chipGroupHtml('category', state.categories, selectedCategory)}
+        </div>
+        <div class="form-row">
+          <label>支付方式</label>
+          ${chipGroupHtml('method', state.methods, selectedMethod)}
         </div>
         <div class="form-row">
           <label>項目名稱</label>
@@ -364,10 +379,6 @@ async function openExpenseModal(localId) {
           </div>
         </div>
         <div class="form-row">
-          <label>實際刷卡台幣金額</label>
-          <input type="number" inputmode="decimal" id="f_cardtwd" value="${rec && rec.actualCardTWD != null ? rec.actualCardTWD : ''}">
-        </div>
-        <div class="form-row">
           <label>備註</label>
           <textarea id="f_note">${rec ? escapeHtml(rec.note) : ''}</textarea>
         </div>
@@ -379,6 +390,8 @@ async function openExpenseModal(localId) {
       </div>
     </div>`;
 
+  wireChipGroup('category');
+  wireChipGroup('method');
   $('#modalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'modalBackdrop') closeModal(); });
   $('#cancelBtn').addEventListener('click', closeModal);
   if (isEdit) $('#deleteBtn').addEventListener('click', async () => {
@@ -387,14 +400,16 @@ async function openExpenseModal(localId) {
     closeModal();
   });
   $('#saveBtn').addEventListener('click', async () => {
+    // actualCardTWD is intentionally not collected here — it's filled in later
+    // during desktop reconciliation directly in the sheet, and updateExpense
+    // preserves whatever value is already on the local record.
     const fields = {
       date: $('#f_date').value,
-      category: $('#f_category').value,
-      method: $('#f_method').value,
+      category: $('#categoryChips').dataset.value,
+      method: $('#methodChips').dataset.value,
       item: $('#f_item').value.trim(),
       amountUSD: $('#f_usd').value === '' ? null : Number($('#f_usd').value),
       amountTWD: $('#f_twd').value === '' ? null : Number($('#f_twd').value),
-      actualCardTWD: $('#f_cardtwd').value === '' ? null : Number($('#f_cardtwd').value),
       note: $('#f_note').value.trim(),
     };
     if (!fields.date || !fields.item) { showToast('請至少填日期和項目名稱'); return; }
@@ -433,18 +448,65 @@ function wireSettings() {
   });
 }
 
+/* ---------- tabs ---------- */
+function switchTab(tabId) {
+  document.querySelectorAll('.tab-panel').forEach((p) => p.classList.toggle('active', p.id === tabId));
+  document.querySelectorAll('.nav-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === tabId));
+  $('#addFab').style.display = tabId === 'tab-record' ? '' : 'none';
+}
+function wireTabs() {
+  document.querySelectorAll('.nav-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+}
+
+/* ---------- category/method option management ---------- */
+function renderOptionLists() {
+  $('#categoryOptionList').innerHTML = state.categories.map((c) => `<span class="chip">${escapeHtml(c)}</span>`).join('');
+  $('#methodOptionList').innerHTML = state.methods.map((m) => `<span class="chip">${escapeHtml(m)}</span>`).join('');
+}
+
+async function addOption(field, value) {
+  if (!state.syncUrl) { showToast('請先設定雲端同步網址'); return; }
+  if (!navigator.onLine) { showToast('新增分類/付款方式需要連線'); return; }
+  const trimmed = value.trim();
+  if (!trimmed) return;
+  try {
+    const res = await callSync('addOption', { field, value: trimmed });
+    if (field === 'category' && res.categories) { state.categories = res.categories; await saveMeta('categories', res.categories); }
+    if (field === 'method' && res.methods) { state.methods = res.methods; await saveMeta('methods', res.methods); }
+    renderOptionLists();
+    showToast('已新增並同步到試算表');
+  } catch (e) {
+    console.error('addOption failed', e);
+    showToast('新增失敗：' + e.message);
+  }
+}
+
+function wireOptionManagement() {
+  renderOptionLists();
+  $('#addCategoryBtn').addEventListener('click', async () => {
+    await addOption('category', $('#newCategoryInput').value);
+    $('#newCategoryInput').value = '';
+  });
+  $('#addMethodBtn').addEventListener('click', async () => {
+    await addOption('method', $('#newMethodInput').value);
+    $('#newMethodInput').value = '';
+  });
+}
+
 /* ---------- init ---------- */
 async function init() {
   db = await openDB();
   await loadMeta();
   wireSettings();
+  wireTabs();
+  wireOptionManagement();
   $('#addFab').addEventListener('click', () => openExpenseModal(null));
   $('#syncBadge').addEventListener('click', () => {
     if (state.syncUrl) runSync();
-    else document.getElementById('settingsCard').scrollIntoView({ behavior: 'smooth' });
+    else switchTab('tab-settings');
   });
-  window.addEventListener('online', runSync);
-  window.addEventListener('offline', updateSyncBadge);
+  window.addEventListener('online', () => { showToast('已恢復連線，開始同步'); runSync(); });
+  window.addEventListener('offline', () => { showToast('已離線，記帳會先存在手機上'); updateSyncBadge(); });
   await renderAll();
   if (state.syncUrl) runSync();
 
