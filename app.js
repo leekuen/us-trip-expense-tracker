@@ -208,8 +208,11 @@ async function updateSyncBadge() {
 
 let syncQueued = false;
 async function runSync() {
-  await updateSyncBadge();
-  if (!state.syncUrl || !navigator.onLine) return;
+  // The guard below must run with no `await` ahead of it — otherwise two
+  // rapid calls (e.g. add-then-delete within the same second) can both read
+  // state.syncing as false before either sets it, and run two overlapping
+  // pull/push cycles that race on the same IndexedDB records.
+  if (!state.syncUrl || !navigator.onLine) { await updateSyncBadge(); return; }
   if (state.syncing) { syncQueued = true; return; }
   state.syncing = true;
   await updateSyncBadge();
@@ -271,18 +274,31 @@ async function pushPendingToSheet() {
       amountUSD: rec.amountUSD, amountTWD: rec.amountTWD, note: rec.note,
       actualCardTWD: rec.actualCardTWD, lastModified: rec.lastModified,
     };
+    const queuedAt = rec.lastModified;
+
     if (rec.syncStatus === 'pending-create') {
       const res = await callSync('create', { data });
-      rec.sheetRow = res.row;
-      rec.syncStatus = 'synced';
-      await idbPut(STORE_EXPENSES, rec);
+      // Re-read instead of writing the pre-await snapshot back — the user
+      // may have edited or deleted this record locally while the request
+      // was in flight, and blindly overwriting would either lose that edit
+      // or resurrect a record the user just deleted.
+      const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
+      if (!current) continue; // deleted locally in the meantime; the row now exists orphaned in the sheet, which is an acceptable rare edge case
+      current.sheetRow = res.row;
+      current.syncStatus = current.lastModified === queuedAt ? 'synced' : 'pending-update';
+      await idbPut(STORE_EXPENSES, current);
     } else if (rec.syncStatus === 'pending-update') {
       await callSync('update', { row: rec.sheetRow, data });
-      rec.syncStatus = 'synced';
-      await idbPut(STORE_EXPENSES, rec);
+      const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
+      if (!current) continue;
+      if (current.lastModified === queuedAt) current.syncStatus = 'synced';
+      await idbPut(STORE_EXPENSES, current);
     } else if (rec.syncStatus === 'pending-delete') {
       await callSync('delete', { row: rec.sheetRow, data: { lastModified: rec.lastModified } });
-      await idbDelete(STORE_EXPENSES, rec.localId);
+      const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
+      // Only remove locally if nothing changed the record since we queued
+      // this delete (e.g. the user didn't reopen and edit it mid-flight).
+      if (current && current.lastModified === queuedAt) await idbDelete(STORE_EXPENSES, rec.localId);
     }
   }
 }
