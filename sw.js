@@ -1,9 +1,16 @@
-const CACHE_NAME = 'us-expense-shell-v5';
+const CACHE_NAME = 'us-expense-shell-v6';
 const SHELL_FILES = ['./', './index.html', './style.css', './app.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_FILES)).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) =>
+      // cache.addAll() uses a plain fetch, which GitHub Pages' Cache-Control:
+      // max-age=600 on these files can serve stale from the browser's own
+      // HTTP cache even when this install is clearly meant to grab the
+      // latest version. { cache: 'reload' } forces each request to bypass
+      // that and hit the network.
+      Promise.all(SHELL_FILES.map((url) => fetch(url, { cache: 'reload' }).then((resp) => cache.put(url, resp))))
+    ).then(() => self.skipWaiting())
   );
 });
 
