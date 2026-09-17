@@ -6,6 +6,7 @@ const STORE_META = 'meta';
 
 const DEFAULT_CATEGORIES = ['🚗 交通', '🏨 住宿', '🍽 三餐', '☕️ 小食', '🤡 娛樂', '🛍️ 伴手禮', '🎲 其他'];
 const DEFAULT_METHODS = ['現金', '刷卡', '電子支付', '中信刷卡'];
+const TWD_BUDGET_CAP = 317200; // STUF計畫核定經費：機票40,000＋生活費270,000＋保險費6,000＋簽證費1,200
 
 let db = null;
 let state = {
@@ -277,7 +278,11 @@ async function pushPendingToSheet() {
     const queuedAt = rec.lastModified;
 
     if (rec.syncStatus === 'pending-create') {
-      const res = await callSync('create', { data });
+      // localId lets the backend recognize a retried request (e.g. the phone
+      // lost signal right after the server created the row but before the
+      // response arrived) and return the existing row instead of appending
+      // a duplicate.
+      const res = await callSync('create', { data, localId: rec.localId });
       // Re-read instead of writing the pre-await snapshot back — the user
       // may have edited or deleted this record locally while the request
       // was in flight, and blindly overwriting would either lose that edit
@@ -288,7 +293,7 @@ async function pushPendingToSheet() {
       current.syncStatus = current.lastModified === queuedAt ? 'synced' : 'pending-update';
       await idbPut(STORE_EXPENSES, current);
     } else if (rec.syncStatus === 'pending-update') {
-      await callSync('update', { row: rec.sheetRow, data });
+      await callSync('update', { row: rec.sheetRow, data, localId: rec.localId });
       const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
       if (!current) continue;
       if (current.lastModified === queuedAt) current.syncStatus = 'synced';
@@ -316,6 +321,11 @@ function renderSummary(rows) {
   const totalTWD = rows.reduce((s, r) => s + (Number(r.amountTWD) || 0), 0);
   $('#totalUSD').textContent = '$' + fmtMoney(totalUSD);
   $('#totalTWD').textContent = 'NT$' + fmtMoney(totalTWD);
+
+  const remaining = TWD_BUDGET_CAP - totalTWD;
+  const el = $('#budgetRemaining');
+  el.textContent = (remaining < 0 ? '-NT$' + fmtMoney(-remaining) : 'NT$' + fmtMoney(remaining));
+  el.classList.toggle('over-budget', remaining < 0);
 }
 
 function renderList(rows) {

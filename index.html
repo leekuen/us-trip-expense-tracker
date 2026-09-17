@@ -30,6 +30,10 @@
             <div class="total-value" id="totalTWD">NT$0</div>
           </div>
         </div>
+        <div class="budget-row">
+          <div class="total-label">台幣預算剩餘（上限 NT$317,200）</div>
+          <div class="total-value" id="budgetRemaining">NT$0</div>
+        </div>
       </div>
 
       <div id="expenseList"></div>
@@ -60,19 +64,29 @@
     var payload = JSON.parse(e.postData.contents);
     var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('記帳');
     if (!sheet) throw new Error('找不到「記帳」分頁');
-    ensureLastModifiedColumn_(sheet);
+    ensureBookkeepingColumns_(sheet);
+    var tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
     var action = payload.action || 'create';
     var d = payload.data || {};
     var now = new Date().toISOString();
 
     if (action === 'create') {
+      // Idempotent: if this device already successfully created this record
+      // before but never received the response (flaky mobile network), retry
+      // must not append a second row — look it up by the client-generated id.
+      var localId = String(payload.localId || '').trim();
+      if (localId) {
+        var existingRow = findRowByLocalId_(sheet, localId);
+        if (existingRow) return json_({ status: 'ok', row: existingRow, lastModified: d.lastModified || now });
+      }
       sheet.appendRow([
         d.date || '', d.category || '', d.item || '', d.method || '',
         d.amountUSD != null ? d.amountUSD : '',
         d.amountTWD != null ? d.amountTWD : '',
         d.note || '',
         d.actualCardTWD != null ? d.actualCardTWD : '',
-        d.lastModified || now
+        d.lastModified || now,
+        localId
       ]);
       return json_({ status: 'ok', row: sheet.getLastRow(), lastModified: d.lastModified || now });
     }
@@ -89,6 +103,10 @@
         d.actualCardTWD != null ? d.actualCardTWD : '',
         d.lastModified || now
       ]]);
+      // Backfill the local-id column for rows created before this idempotency
+      // fix existed, so a future retry of this row is also protected.
+      var updLocalId = String(payload.localId || '').trim();
+      if (updLocalId) sheet.getRange(payload.row, 10).setValue(updLocalId);
       return json_({ status: 'ok' });
     }
 
@@ -122,7 +140,12 @@
             deleted: !hasData,
             lastModified: lmStr,
             data: {
-              date: row[0], category: row[1], item: row[2], method: row[3],
+              // Sheets auto-types a "2026-09-01"-looking string into a real
+              // Date cell. getValues() then hands back a JS Date object, and
+              // naively JSON-serializing that renders in UTC — for a GMT+8
+              // sheet that silently shifts the calendar date back a day.
+              // Re-format explicitly using the spreadsheet's own timezone.
+              date: normalizeDateCell_(row[0], tz), category: row[1], item: row[2], method: row[3],
               amountUSD: row[4], amountTWD: row[5], note: row[6], actualCardTWD: row[7]
             }
           });
@@ -192,9 +215,26 @@ function getListValidationValues_(sheet, col) {
   return [];
 }
 
-function ensureLastModifiedColumn_(sheet) {
-  var header = sheet.getRange(1, 9).getValue();
-  if (!header) sheet.getRange(1, 9).setValue('最後修改時間（同步用，勿刪）');
+function ensureBookkeepingColumns_(sheet) {
+  var h9 = sheet.getRange(1, 9).getValue();
+  if (!h9) sheet.getRange(1, 9).setValue('最後修改時間（同步用，勿刪）');
+  var h10 = sheet.getRange(1, 10).getValue();
+  if (!h10) sheet.getRange(1, 10).setValue('本機記錄ID（同步用，勿刪）');
+}
+
+function findRowByLocalId_(sheet, localId) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  var ids = sheet.getRange(2, 10, lastRow - 1, 1).getValues();
+  for (var i = 0; i < ids.length; i++) {
+    if (String(ids[i][0]) === localId) return i + 2;
+  }
+  return null;
+}
+
+function normalizeDateCell_(v, tz) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyy-MM-dd');
+  return v;
 }
 
 function json_(obj) {

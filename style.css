@@ -133,6 +133,16 @@ body {
 .summary-grid .total-label { color: var(--text-muted); }
 .summary-grid .total-value { font-size: 18px; font-weight: 700; }
 
+.budget-row {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 13px;
+}
+.budget-row .total-label { color: var(--text-muted); }
+.budget-row .total-value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+.budget-row .total-value.over-budget { color: var(--danger); }
+
 .add-fab {
   position: fixed;
   right: 18px;
