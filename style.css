@@ -250,6 +250,17 @@ body {
 .import-row.dup .exp-title { color: var(--pending); }
 .modal-actions button:disabled { opacity: 0.4; }
 
+.exp-tag.dup-tag { background: #fbeae7; color: var(--danger); }
+.dup-title { margin: 12px 0 2px; font-size: 14px; }
+.dup-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; margin: 8px 0; }
+.dup-head { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+.dup-rec { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px dashed var(--border); }
+.dup-rec:first-of-type { border-top: none; }
+.dup-rec-main { flex: 1; min-width: 0; }
+.dup-rec .exp-title { font-weight: 600; font-size: 14px; }
+.dup-rec .exp-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.dup-del { color: var(--danger); flex-shrink: 0; }
+
 .diag-list { margin-top: 8px; }
 .diag-item { border-top: 1px dashed var(--border); padding: 8px 0; font-size: 13px; }
 .diag-tag {

@@ -19,6 +19,7 @@ let state = {
   syncErrors: {}, // per-item last failure, keyed by localId or 'opt:field:value' (in-memory, for the 同步狀態 panel)
   lastSyncError: null, // {message, at} of the most recent cycle-level failure
   lastSyncOk: '',
+  dupIgnored: [], // group ids the user marked 不是重複
 };
 
 /* ---------- tiny helpers ---------- */
@@ -93,6 +94,7 @@ async function loadMeta() {
     if (r.key === 'methods' && r.value && r.value.length) state.methods = r.value;
     if (r.key === 'pendingOptions' && Array.isArray(r.value)) state.pendingOptions = r.value;
     if (r.key === 'lastSyncOk') state.lastSyncOk = r.value;
+    if (r.key === 'dupIgnored' && Array.isArray(r.value)) state.dupIgnored = r.value;
   }
 }
 function saveMeta(key, value) {
@@ -402,8 +404,112 @@ async function pushOneRecord(rec) {
 }
 
 /* ---------- rendering ---------- */
+/* ---------- possible-duplicate finder ---------- */
+// Same date + same amount is the base signal. Same item text on top of that is
+// "strong" (almost certainly a double entry); a different item with the same
+// date and amount is "weak" and left for the user to judge.
+function normItemKey(s) { return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, ''); }
+
+function findDuplicateGroups(rows) {
+  const live = rows.filter((r) => r.syncStatus !== 'pending-delete');
+  const buckets = new Map();
+  for (const r of live) {
+    const twd = Number(r.amountTWD) || 0;
+    const usd = Number(r.amountUSD) || 0;
+    if (!twd && !usd) continue;
+    const key = `${r.date}|${twd}|${usd}`;
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(r);
+  }
+  const groups = [];
+  for (const recs of buckets.values()) {
+    if (recs.length < 2) continue;
+    const byItem = new Map();
+    for (const r of recs) {
+      const k = normItemKey(r.item);
+      if (!byItem.has(k)) byItem.set(k, []);
+      byItem.get(k).push(r);
+    }
+    const leftovers = [];
+    for (const sub of byItem.values()) {
+      if (sub.length >= 2) groups.push({ level: 'strong', recs: sub });
+      else leftovers.push(...sub);
+    }
+    if (leftovers.length >= 2) groups.push({ level: 'weak', recs: leftovers });
+  }
+  for (const g of groups) g.id = g.recs.map((r) => r.localId).sort().join('+');
+  return groups
+    .filter((g) => !state.dupIgnored.includes(g.id))
+    .sort((a, b) => (a.level === b.level
+      ? (b.recs[0].date || '').localeCompare(a.recs[0].date || '')
+      : (a.level === 'strong' ? -1 : 1)));
+}
+
+let dupInfo = { groups: [], ids: new Set() };
+
+function refreshDupInfo(rows) {
+  const groups = findDuplicateGroups(rows);
+  dupInfo = { groups, ids: new Set(groups.flatMap((g) => g.recs.map((r) => r.localId))) };
+  const btn = $('#dupBtn');
+  if (btn) btn.textContent = groups.length ? `🔍 找出可能重複（${groups.length} 組）` : '🔍 找出可能重複';
+}
+
+async function openDupModal() {
+  const rows = await getAllExpenses();
+  const groups = findDuplicateGroups(rows);
+  const amountText = (r) => [Number(r.amountTWD) ? 'NT$' + fmtMoney(r.amountTWD) : '', Number(r.amountUSD) ? '$' + fmtMoney(r.amountUSD) : ''].filter(Boolean).join(' ＋ ');
+  const recHtml = (r) => `
+    <div class="dup-rec">
+      <div class="dup-rec-main">
+        <div class="exp-title">${escapeHtml(r.item || '(未命名)')}</div>
+        <div class="exp-meta">${escapeHtml(r.category || '')}　${escapeHtml(r.method || '')}${r.syncStatus && r.syncStatus.startsWith('pending') ? '　⏳待同步' : ''}</div>
+        ${r.note ? `<div class="exp-meta">${escapeHtml(r.note)}</div>` : ''}
+      </div>
+      <button class="icon-btn dup-del" data-del="${escapeHtml(r.localId)}">刪除這筆</button>
+    </div>`;
+  const section = (title, hint, list) => !list.length ? '' : `
+    <h4 class="dup-title">${title}</h4>
+    <p class="hint">${hint}</p>
+    ${list.map((g) => `
+      <div class="dup-card">
+        <div class="dup-head">${escapeHtml(g.recs[0].date || '')}　${escapeHtml(amountText(g.recs[0]))}</div>
+        ${g.recs.map(recHtml).join('')}
+        <button class="icon-btn" data-ignore="${escapeHtml(g.id)}">不是重複，忽略這組</button>
+      </div>`).join('')}`;
+
+  const strong = groups.filter((g) => g.level === 'strong');
+  const weak = groups.filter((g) => g.level === 'weak');
+  $('#modalRoot').innerHTML = `
+    <div class="modal-backdrop" id="modalBackdrop">
+      <div class="modal-sheet">
+        <h3>🔍 可能重複的紀錄</h3>
+        ${groups.length ? '' : '<div class="empty-state">沒有發現可能重複的紀錄 ✅</div>'}
+        ${section('很可能重複', '同一天、同項目、同金額。', strong)}
+        ${section('金額相同，項目不同', '同一天、金額相同但項目名稱不同，請自己確認是不是同一筆。', weak)}
+        <div class="modal-actions"><button class="cancel-btn" id="cancelBtn">關閉</button></div>
+      </div>
+    </div>`;
+  $('#modalBackdrop').addEventListener('click', async (e) => {
+    if (e.target.id === 'modalBackdrop') { closeModal(); return; }
+    const delId = e.target.dataset && e.target.dataset.del;
+    const ignoreId = e.target.dataset && e.target.dataset.ignore;
+    if (delId) {
+      if (!confirm('確定要刪除這筆記帳嗎？')) return;
+      await deleteExpense(delId);
+      await openDupModal();
+    } else if (ignoreId) {
+      state.dupIgnored.push(ignoreId);
+      await saveMeta('dupIgnored', state.dupIgnored);
+      await renderAll();
+      await openDupModal();
+    }
+  });
+  $('#cancelBtn').addEventListener('click', closeModal);
+}
+
 async function renderAll() {
   const rows = await getAllExpenses();
+  refreshDupInfo(rows);
   renderSummary(rows);
   renderList(rows);
   await updateSyncBadge();
@@ -547,6 +653,7 @@ function renderList(rows) {
               <span class="exp-tag">${escapeHtml(r.category || '')}</span>
               <span class="exp-tag">${escapeHtml(r.method || '')}</span>
               ${pending ? '<span class="exp-tag pending-tag">待同步</span>' : ''}
+              ${dupInfo.ids.has(r.localId) ? '<span class="exp-tag dup-tag">⚠️可能重複</span>' : ''}
               ${r.note ? '　' + escapeHtml(r.note) : ''}
             </div>
           </div>
@@ -927,6 +1034,7 @@ async function init() {
   wireSyncDiag();
   $('#addFab').addEventListener('click', () => openExpenseModal(null));
   $('#importBtn').addEventListener('click', openImportModal);
+  $('#dupBtn').addEventListener('click', openDupModal);
   $('#syncBadge').addEventListener('click', () => {
     if (state.syncUrl) runSync();
     else switchTab('tab-settings');
