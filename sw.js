@@ -1,4 +1,5 @@
-const CACHE_NAME = 'us-expense-shell-v7';
+const CACHE_PREFIX = 'us-expense-shell-';
+const CACHE_NAME = CACHE_PREFIX + 'v8';
 const SHELL_FILES = ['./', './index.html', './style.css', './app.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -16,8 +17,11 @@ self.addEventListener('install', (event) => {
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
+    // 同網域（leekuen.github.io）底下還有其他 PWA（例如共同記帳）在用 Cache Storage，
+    // 只能清自己前綴的舊版本，不能把所有不是 CACHE_NAME 的都刪掉。
+    caches.keys().then((keys) => Promise.all(
+      keys.filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE_NAME).map((k) => caches.delete(k))
+    )).then(() => self.clients.claim())
   );
 });
 
