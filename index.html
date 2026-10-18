@@ -260,6 +260,14 @@ function doGet(e) {
         </details>
       </div>
 
+      <div class="card" id="syncDiagCard">
+        <h2>🔍 同步狀態</h2>
+        <div id="syncDiag"></div>
+        <button class="btn-secondary" id="retrySyncBtn">🔄 立即重試同步</button>
+        <button class="btn-secondary" id="fullResyncBtn">⬇️ 重新從試算表抓取全部紀錄</button>
+        <p class="hint">提醒：在試算表裡想移除一筆時，請只清空那一列的內容，不要用「刪除列」，否則下面所有列的列號會往上移，手機記住的對應就會錯位。</p>
+      </div>
+
       <div class="card">
         <h2>📲 加到手機主畫面</h2>
         <div class="install-steps">

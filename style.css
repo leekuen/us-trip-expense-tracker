@@ -249,6 +249,17 @@ body {
 .import-row .exp-amount { text-align: right; font-weight: 700; white-space: nowrap; font-size: 13px; }
 .import-row.dup .exp-title { color: var(--pending); }
 .modal-actions button:disabled { opacity: 0.4; }
+
+.diag-list { margin-top: 8px; }
+.diag-item { border-top: 1px dashed var(--border); padding: 8px 0; font-size: 13px; }
+.diag-tag {
+  display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 8px;
+  background: var(--pending-light); color: var(--pending); margin-right: 4px;
+}
+.diag-error {
+  font-size: 12.5px; color: var(--danger); background: #fbeae7;
+  border-radius: 8px; padding: 6px 8px; margin: 4px 0; word-break: break-word;
+}
 .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
 .modal-actions button { flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px; }
 .modal-actions .save-btn { background: var(--accent); color: #fff; }

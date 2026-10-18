@@ -16,6 +16,9 @@ let state = {
   methods: DEFAULT_METHODS,
   pendingOptions: [], // [{field:'category'|'method', value}] typed via the "✏️ 自訂" chip, waiting to sync to the sheet's dropdown
   syncing: false,
+  syncErrors: {}, // per-item last failure, keyed by localId or 'opt:field:value' (in-memory, for the 同步狀態 panel)
+  lastSyncError: null, // {message, at} of the most recent cycle-level failure
+  lastSyncOk: '',
 };
 
 /* ---------- tiny helpers ---------- */
@@ -89,6 +92,7 @@ async function loadMeta() {
     if (r.key === 'categories' && r.value && r.value.length) state.categories = r.value;
     if (r.key === 'methods' && r.value && r.value.length) state.methods = r.value;
     if (r.key === 'pendingOptions' && Array.isArray(r.value)) state.pendingOptions = r.value;
+    if (r.key === 'lastSyncOk') state.lastSyncOk = r.value;
   }
 }
 function saveMeta(key, value) {
@@ -113,12 +117,18 @@ async function registerCustomOption(field, value) {
 async function pushPendingOptions() {
   if (!state.pendingOptions.length) return;
   const remaining = [];
-  for (const opt of state.pendingOptions) {
+  const queue = state.pendingOptions;
+  for (let i = 0; i < queue.length; i++) {
+    const opt = queue[i];
+    const key = 'opt:' + opt.field + ':' + opt.value;
     try {
       await callSync('addOption', opt);
+      delete state.syncErrors[key];
     } catch (e) {
       console.error('addOption sync failed, will retry later', e);
+      state.syncErrors[key] = { message: e.message, at: nowISO() };
       remaining.push(opt);
+      if (e.network) { remaining.push(...queue.slice(i + 1)); break; }
     }
   }
   state.pendingOptions = remaining;
@@ -188,14 +198,30 @@ async function deleteExpense(localId) {
 
 /* ---------- sync engine ---------- */
 // Content-Type text/plain avoids a CORS preflight (Apps Script doesn't answer OPTIONS).
+// err.network = the request never produced a usable answer (offline, bad URL,
+// login page instead of JSON) so there's no point retrying the rest of this
+// cycle; err.server = the backend answered with an error for this request only.
 async function callSync(action, payload) {
-  const resp = await fetch(state.syncUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify({ action, ...payload }),
-  });
-  const json = await resp.json();
-  if (json.status !== 'ok') throw new Error(json.message || 'sync failed');
+  let json;
+  try {
+    const resp = await fetch(state.syncUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ action, ...payload }),
+    });
+    json = await resp.json();
+  } catch (e) {
+    const err = new Error(e instanceof SyntaxError
+      ? '伺服器回應不是 JSON，可能是 Apps Script 網址或「誰可以存取」設定有誤'
+      : '連線失敗（網路中斷或網址不正確）：' + e.message);
+    err.network = true;
+    throw err;
+  }
+  if (json.status !== 'ok') {
+    const err = new Error(json.message || '伺服器回報失敗');
+    err.server = true;
+    throw err;
+  }
   return json;
 }
 
@@ -230,15 +256,36 @@ async function runSync() {
     await pullFromSheet();
     await pushPendingOptions();
     await pushPendingToSheet();
+    state.lastSyncError = null;
+    state.lastSyncOk = nowISO();
+    await saveMeta('lastSyncOk', state.lastSyncOk);
   } catch (e) {
     console.error('sync failed', e);
-    showToast('同步失敗，稍後會自動重試');
+    state.lastSyncError = { message: e.message, at: nowISO() };
+    showToast('同步失敗：' + e.message);
   } finally {
     state.syncing = false;
     await updateSyncBadge();
     await renderAll();
     if (syncQueued) { syncQueued = false; runSync(); }
   }
+}
+
+// A backend that predates the timezone fix serializes Date cells as UTC ISO
+// strings ("2026-08-31T16:00:00.000Z" for 9/1 in a GMT+8 sheet). Convert those
+// back to the calendar date in Taipei so the app doesn't depend on whether the
+// Apps Script was redeployed; also accept a typed "2026/9/1".
+function normalizeRemoteDate(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const d = new Date(s);
+    if (!isNaN(d)) {
+      return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+    }
+  }
+  const m = s.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+  if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
+  return s;
 }
 
 async function pullFromSheet() {
@@ -251,6 +298,7 @@ async function pullFromSheet() {
 
   for (const remote of res.rows) {
     const local = bySheetRow.get(remote.row);
+    const data = { ...remote.data, date: normalizeRemoteDate(remote.data && remote.data.date) };
     if (local) {
       const localPending = local.syncStatus && local.syncStatus.startsWith('pending');
       const remoteWins = !localPending || remote.lastModified > local.lastModified;
@@ -258,13 +306,13 @@ async function pullFromSheet() {
       if (remote.deleted) {
         await idbDelete(STORE_EXPENSES, local.localId);
       } else {
-        Object.assign(local, remote.data, { lastModified: remote.lastModified, syncStatus: 'synced', sheetRow: remote.row });
+        Object.assign(local, data, { lastModified: remote.lastModified, syncStatus: 'synced', sheetRow: remote.row });
         await idbPut(STORE_EXPENSES, local);
       }
     } else if (!remote.deleted) {
       await idbPut(STORE_EXPENSES, {
         localId: uid(),
-        ...remote.data,
+        ...data,
         lastModified: remote.lastModified,
         sheetRow: remote.row,
         syncStatus: 'synced',
@@ -279,41 +327,54 @@ async function pushPendingToSheet() {
   const rows = await idbGetAll(STORE_EXPENSES);
   const pending = rows.filter((r) => r.syncStatus && r.syncStatus.startsWith('pending')).sort((a, b) => a.lastModified.localeCompare(b.lastModified));
   for (const rec of pending) {
-    const data = {
-      date: rec.date, category: rec.category, item: rec.item, method: rec.method,
-      amountUSD: rec.amountUSD, amountTWD: rec.amountTWD, note: rec.note,
-      actualCardTWD: rec.actualCardTWD, lastModified: rec.lastModified,
-    };
-    const queuedAt = rec.lastModified;
-
-    if (rec.syncStatus === 'pending-create') {
-      // localId lets the backend recognize a retried request (e.g. the phone
-      // lost signal right after the server created the row but before the
-      // response arrived) and return the existing row instead of appending
-      // a duplicate.
-      const res = await callSync('create', { data, localId: rec.localId });
-      // Re-read instead of writing the pre-await snapshot back — the user
-      // may have edited or deleted this record locally while the request
-      // was in flight, and blindly overwriting would either lose that edit
-      // or resurrect a record the user just deleted.
-      const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
-      if (!current) continue; // deleted locally in the meantime; the row now exists orphaned in the sheet, which is an acceptable rare edge case
-      current.sheetRow = res.row;
-      current.syncStatus = current.lastModified === queuedAt ? 'synced' : 'pending-update';
-      await idbPut(STORE_EXPENSES, current);
-    } else if (rec.syncStatus === 'pending-update') {
-      await callSync('update', { row: rec.sheetRow, data, localId: rec.localId });
-      const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
-      if (!current) continue;
-      if (current.lastModified === queuedAt) current.syncStatus = 'synced';
-      await idbPut(STORE_EXPENSES, current);
-    } else if (rec.syncStatus === 'pending-delete') {
-      await callSync('delete', { row: rec.sheetRow, data: { lastModified: rec.lastModified } });
-      const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
-      // Only remove locally if nothing changed the record since we queued
-      // this delete (e.g. the user didn't reopen and edit it mid-flight).
-      if (current && current.lastModified === queuedAt) await idbDelete(STORE_EXPENSES, rec.localId);
+    try {
+      await pushOneRecord(rec);
+      delete state.syncErrors[rec.localId];
+    } catch (e) {
+      console.error('push failed for', rec.localId, e);
+      state.syncErrors[rec.localId] = { message: e.message, at: nowISO() };
+      // A server-side rejection of this one record must not block the ones
+      // queued behind it; a network failure means the rest would fail too.
+      if (e.network) throw e;
     }
+  }
+}
+
+async function pushOneRecord(rec) {
+  const data = {
+    date: rec.date, category: rec.category, item: rec.item, method: rec.method,
+    amountUSD: rec.amountUSD, amountTWD: rec.amountTWD, note: rec.note,
+    actualCardTWD: rec.actualCardTWD, lastModified: rec.lastModified,
+  };
+  const queuedAt = rec.lastModified;
+
+  if (rec.syncStatus === 'pending-create') {
+    // localId lets the backend recognize a retried request (e.g. the phone
+    // lost signal right after the server created the row but before the
+    // response arrived) and return the existing row instead of appending
+    // a duplicate.
+    const res = await callSync('create', { data, localId: rec.localId });
+    // Re-read instead of writing the pre-await snapshot back — the user
+    // may have edited or deleted this record locally while the request
+    // was in flight, and blindly overwriting would either lose that edit
+    // or resurrect a record the user just deleted.
+    const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
+    if (!current) return; // deleted locally in the meantime; the row now exists orphaned in the sheet, which is an acceptable rare edge case
+    current.sheetRow = res.row;
+    current.syncStatus = current.lastModified === queuedAt ? 'synced' : 'pending-update';
+    await idbPut(STORE_EXPENSES, current);
+  } else if (rec.syncStatus === 'pending-update') {
+    await callSync('update', { row: rec.sheetRow, data, localId: rec.localId });
+    const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
+    if (!current) return;
+    if (current.lastModified === queuedAt) current.syncStatus = 'synced';
+    await idbPut(STORE_EXPENSES, current);
+  } else if (rec.syncStatus === 'pending-delete') {
+    await callSync('delete', { row: rec.sheetRow, data: { lastModified: rec.lastModified } });
+    const current = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === rec.localId);
+    // Only remove locally if nothing changed the record since we queued
+    // this delete (e.g. the user didn't reopen and edit it mid-flight).
+    if (current && current.lastModified === queuedAt) await idbDelete(STORE_EXPENSES, rec.localId);
   }
 }
 
@@ -323,9 +384,110 @@ async function renderAll() {
   renderSummary(rows);
   renderList(rows);
   await updateSyncBadge();
+  await renderSyncDiag();
 }
 
-function renderSummary(rows) {
+function fmtTime(iso) {
+  if (!iso) return '尚無紀錄';
+  const d = new Date(iso);
+  return isNaN(d) ? String(iso) : d.toLocaleString('zh-TW', { hour12: false });
+}
+
+// 同步狀態 panel: what is pending and why, plus how the totals are made up, so
+// a stuck "待同步" or a total that disagrees with the sheet can be diagnosed
+// from the phone instead of guessed at.
+async function renderSyncDiag() {
+  const box = $('#syncDiag');
+  if (!box) return;
+  const all = await idbGetAll(STORE_EXPENSES);
+  const live = all.filter((r) => r.syncStatus !== 'pending-delete');
+  const pending = all.filter((r) => r.syncStatus && r.syncStatus.startsWith('pending'));
+  const label = { 'pending-create': '新增', 'pending-update': '修改', 'pending-delete': '刪除' };
+  const sumTWD = live.reduce((s, r) => s + (Number(r.amountTWD) || 0), 0);
+  const sumUSD = live.reduce((s, r) => s + (Number(r.amountUSD) || 0), 0);
+  const usdOnly = live.filter((r) => !(Number(r.amountTWD) > 0) && Number(r.amountUSD) > 0);
+
+  let html = '';
+  if (!state.syncUrl) html += '<div class="diag-error">尚未設定同步網址，資料只存在這支手機上。</div>';
+  if (state.lastSyncError) {
+    html += `<div class="diag-error">最近一次同步失敗（${escapeHtml(fmtTime(state.lastSyncError.at))}）：${escapeHtml(state.lastSyncError.message)}</div>`;
+  }
+  html += `<div class="hint">最近一次成功同步：${escapeHtml(fmtTime(state.lastSyncOk))}</div>`;
+  html += `<div class="hint">本機共 ${live.length} 筆・台幣合計 NT$${fmtMoney(sumTWD)}・美金合計 $${fmtMoney(sumUSD)}</div>`;
+  if (usdOnly.length) {
+    html += `<div class="hint">其中 ${usdOnly.length} 筆只填了美金（不計入台幣預算）：${escapeHtml(usdOnly.slice(0, 5).map((r) => r.item || '(未命名)').join('、'))}${usdOnly.length > 5 ? '…' : ''}</div>`;
+  }
+
+  if (!pending.length && !state.pendingOptions.length) {
+    html += '<div class="hint">目前沒有待同步項目 ✅</div>';
+  } else {
+    html += '<div class="diag-list">';
+    for (const r of pending) {
+      const err = state.syncErrors[r.localId];
+      const amt = r.amountTWD ? 'NT$' + fmtMoney(r.amountTWD) : (r.amountUSD ? '$' + fmtMoney(r.amountUSD) : '');
+      html += `<div class="diag-item">
+        <div><span class="diag-tag">${label[r.syncStatus] || '待處理'}</span> ${escapeHtml(r.date || '')} ${escapeHtml(r.item || '(未命名)')} ${escapeHtml(amt)}${r.sheetRow ? `（試算表第 ${r.sheetRow} 列）` : ''}</div>
+        ${err ? `<div class="diag-error">失敗原因：${escapeHtml(err.message)}</div>` : '<div class="hint">還沒收到失敗訊息（可能還沒輪到或正在同步）</div>'}
+        <button class="icon-btn" data-discard="${escapeHtml(r.localId)}">放棄同步這筆</button>
+      </div>`;
+    }
+    state.pendingOptions.forEach((o, i) => {
+      const err = state.syncErrors['opt:' + o.field + ':' + o.value];
+      html += `<div class="diag-item">
+        <div><span class="diag-tag">選項</span> ${o.field === 'category' ? '分類' : '付款方式'}：${escapeHtml(o.value)}</div>
+        ${err ? `<div class="diag-error">失敗原因：${escapeHtml(err.message)}</div>` : '<div class="hint">還沒收到失敗訊息</div>'}
+        <button class="icon-btn" data-discard-opt="${i}">放棄寫入試算表下拉選單</button>
+      </div>`;
+    });
+    html += '</div>';
+  }
+  box.innerHTML = html;
+}
+
+async function discardPending(localId) {
+  const rec = (await idbGetAll(STORE_EXPENSES)).find((r) => r.localId === localId);
+  if (!rec) return;
+  // create/delete: the sheet never had it / should not have it, so drop it
+  // locally. update: keep the local values and just stop retrying.
+  if (rec.syncStatus === 'pending-update') {
+    rec.syncStatus = 'synced';
+    await idbPut(STORE_EXPENSES, rec);
+  } else {
+    await idbDelete(STORE_EXPENSES, localId);
+  }
+  delete state.syncErrors[localId];
+  await renderAll();
+}
+
+function wireSyncDiag() {
+  $('#syncDiag').addEventListener('click', async (e) => {
+    const id = e.target.dataset && e.target.dataset.discard;
+    const optIdx = e.target.dataset && e.target.dataset.discardOpt;
+    if (id) {
+      if (!confirm('放棄後這筆不會再嘗試同步。確定嗎？')) return;
+      await discardPending(id);
+    } else if (optIdx !== undefined) {
+      if (!confirm('放棄後這個新選項不會寫進試算表的下拉選單（本機仍可使用）。確定嗎？')) return;
+      state.pendingOptions.splice(Number(optIdx), 1);
+      await saveMeta('pendingOptions', state.pendingOptions);
+      await renderAll();
+    }
+  });
+  $('#retrySyncBtn').addEventListener('click', () => {
+    if (!state.syncUrl) { showToast('請先設定 Apps Script 網址'); return; }
+    runSync();
+  });
+  $('#fullResyncBtn').addEventListener('click', async () => {
+    if (!state.syncUrl) { showToast('請先設定 Apps Script 網址'); return; }
+    if (!confirm('會重新從試算表抓取全部紀錄，已同步的紀錄以試算表內容為準（尚未同步的本機變更會保留）。確定嗎？')) return;
+    state.lastPullTime = '';
+    await saveMeta('lastPullTime', '');
+    runSync();
+  });
+}
+
+function renderSummary(allRows) {
+  const rows = allRows.filter((r) => r.syncStatus !== 'pending-delete'); // already deleted from the user's point of view
   const totalUSD = rows.reduce((s, r) => s + (Number(r.amountUSD) || 0), 0);
   const totalTWD = rows.reduce((s, r) => s + (Number(r.amountTWD) || 0), 0);
   $('#totalUSD').textContent = '$' + fmtMoney(totalUSD);
@@ -714,6 +876,10 @@ function wireSettings() {
     if (!confirm('確定清除本機所有記帳資料？（不影響雲端試算表）')) return;
     const rows = await idbGetAll(STORE_EXPENSES);
     for (const r of rows) await idbDelete(STORE_EXPENSES, r.localId);
+    // Without this the next pull still asks only for rows changed since the old
+    // lastPullTime, so everything older would never come back from the sheet.
+    state.lastPullTime = '';
+    await saveMeta('lastPullTime', '');
     await renderAll();
     showToast('本機資料已清除');
   });
@@ -735,6 +901,7 @@ async function init() {
   await loadMeta();
   wireSettings();
   wireTabs();
+  wireSyncDiag();
   $('#addFab').addEventListener('click', () => openExpenseModal(null));
   $('#importBtn').addEventListener('click', openImportModal);
   $('#syncBadge').addEventListener('click', () => {
