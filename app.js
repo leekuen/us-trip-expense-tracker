@@ -131,8 +131,8 @@ async function getAllExpenses() {
   return rows.sort((a, b) => (b.date || '').localeCompare(a.date || '') || b.lastModified.localeCompare(a.lastModified));
 }
 
-async function addExpense(fields) {
-  const rec = {
+function buildExpenseRecord(fields) {
+  return {
     localId: uid(),
     date: fields.date,
     category: fields.category,
@@ -146,7 +146,16 @@ async function addExpense(fields) {
     sheetRow: null,
     syncStatus: 'pending-create',
   };
-  await idbPut(STORE_EXPENSES, rec);
+}
+
+async function addExpense(fields) {
+  await idbPut(STORE_EXPENSES, buildExpenseRecord(fields));
+  await renderAll();
+  runSync();
+}
+
+async function addExpensesBatch(fieldsList) {
+  for (const fields of fieldsList) await idbPut(STORE_EXPENSES, buildExpenseRecord(fields));
   await renderAll();
   runSync();
 }
@@ -505,6 +514,181 @@ async function openExpenseModal(localId) {
 }
 function closeModal() { $('#modalRoot').innerHTML = ''; }
 
+/* ---------- screenshot import (recognition happens in claude.ai, no API key) ---------- */
+function normOptionText(s) { return String(s || '').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase(); }
+
+// Claude may echo a category back without its emoji (or with a different
+// emoji variation selector), so compare on the letters/digits only.
+function matchOption(value, list) {
+  const v = String(value || '').trim();
+  if (!v) return '';
+  const exact = list.find((o) => o === v);
+  if (exact) return exact;
+  const n = normOptionText(v);
+  return n ? (list.find((o) => normOptionText(o) === n) || '') : '';
+}
+
+function toAmount(v) {
+  if (v == null || v === '') return null;
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(/[^\d.\-]/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+function buildImportPrompt() {
+  const today = todayStr();
+  return `我會附上一或多張消費截圖（信用卡通知、行動支付、收據、訂單截圖等）。請辨識每一筆「實際消費」，只輸出一個 JSON 陣列，不要輸出任何其他文字或說明。
+
+每筆物件的欄位：
+- date：消費日期，格式 YYYY-MM-DD（今天是 ${today}，截圖沒標年份時請用 ${today.slice(0, 4)} 年）
+- time：消費時間，24 小時制 HH:mm，看不到就填 ""
+- item：商家或品項名稱（保留原文）
+- amountUSD：美金金額（數字），截圖是美金才填，否則 null
+- amountTWD：台幣金額（數字），截圖是台幣才填，否則 null
+- category：只能從這些選一個，請原樣輸出：${state.categories.join('、')}
+- method：只能從這些選一個，請原樣輸出：${state.methods.join('、')}；判斷不出來填 ""
+- note：其他補充（例如原始時間、卡號末四碼、小費、稅），沒有就填 ""
+
+規則：
+1. 退款、轉帳、餘額、點數、廣告等非消費項目不要列入。
+2. 若截圖時間看起來是台灣時間（例如台灣銀行或信用卡 App 的通知），請換算成美東時間（America/New_York）再填 date 和 time，並在 note 寫「原截圖時間 台灣 yyyy-MM-dd HH:mm」。
+3. 同一筆消費在多張截圖重複出現時只列一次。
+4. 金額只填數字，不要幣別符號和千分位逗號。
+5. 不確定的欄位寧可填 "" 或 null，不要猜。`;
+}
+
+function normalizeImportItem(o) {
+  if (!o || typeof o !== 'object') return null;
+  const amountUSD = toAmount(o.amountUSD);
+  const amountTWD = toAmount(o.amountTWD);
+  const item = String(o.item || '').trim();
+  if (!item && amountUSD == null && amountTWD == null) return null;
+  const dateStr = String(o.date || '').trim();
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(dateStr) ? dateStr : todayStr();
+  const category = matchOption(o.category, state.categories)
+    || state.categories.find((c) => normOptionText(c).includes('其他')) || '';
+  const method = matchOption(o.method, state.methods);
+  const note = ['📸待確認', String(o.time || '').trim(), String(o.note || '').trim()].filter(Boolean).join(' ');
+  return { date, category, method, item, amountUSD, amountTWD, note };
+}
+
+function parseImportText(text) {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fenced ? fenced[1] : text;
+  const start = body.indexOf('[');
+  const end = body.lastIndexOf(']');
+  if (start === -1 || end <= start) throw new Error('找不到 JSON 陣列，請確認有把 Claude 的整段回覆貼進來');
+  let arr;
+  try { arr = JSON.parse(body.slice(start, end + 1)); } catch (e) { throw new Error('JSON 格式有誤，請請 Claude 重新輸出一次'); }
+  if (!Array.isArray(arr)) throw new Error('回覆不是陣列格式');
+  return arr.map(normalizeImportItem).filter(Boolean);
+}
+
+function looksDuplicate(it, existing) {
+  return existing.some((e) => e.syncStatus !== 'pending-delete' && e.date === it.date && (
+    (it.amountTWD != null && Number(e.amountTWD) === it.amountTWD) ||
+    (it.amountUSD != null && Number(e.amountUSD) === it.amountUSD)));
+}
+
+let importDraft = '';
+
+function openImportModal() {
+  $('#modalRoot').innerHTML = `
+    <div class="modal-backdrop" id="modalBackdrop">
+      <div class="modal-sheet">
+        <h3>📸 從截圖匯入</h3>
+        <ol class="import-steps">
+          <li>按下方按鈕複製提示詞。</li>
+          <li>打開 claude.ai，貼上提示詞並附上消費截圖（可一次多張），送出。</li>
+          <li>把 Claude 回覆的內容整段複製，貼到下面。</li>
+        </ol>
+        <button class="btn-secondary" id="copyPromptBtn">📋 複製提示詞</button>
+        <a class="btn-secondary import-link" href="https://claude.ai/new" target="_blank" rel="noopener">🔗 開啟 claude.ai</a>
+        <details class="howto">
+          <summary>複製沒反應？手動複製提示詞</summary>
+          <textarea id="promptFallback" readonly rows="8"></textarea>
+        </details>
+        <div class="form-row">
+          <label>Claude 的回覆</label>
+          <textarea id="importPaste" rows="6" placeholder="貼上 Claude 回覆的 JSON…"></textarea>
+        </div>
+        <div class="modal-actions">
+          <button class="cancel-btn" id="cancelBtn">取消</button>
+          <button class="save-btn" id="parseBtn">解析</button>
+        </div>
+      </div>
+    </div>`;
+  $('#promptFallback').value = buildImportPrompt();
+  $('#importPaste').value = importDraft;
+  $('#modalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'modalBackdrop') closeModal(); });
+  $('#cancelBtn').addEventListener('click', closeModal);
+  $('#copyPromptBtn').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(buildImportPrompt());
+      showToast('已複製提示詞');
+    } catch (e) {
+      showToast('無法自動複製，請展開下方手動複製');
+    }
+  });
+  $('#parseBtn').addEventListener('click', async () => {
+    importDraft = $('#importPaste').value;
+    let items;
+    try { items = parseImportText(importDraft); } catch (e) { showToast(e.message); return; }
+    if (!items.length) { showToast('沒有辨識到任何消費紀錄'); return; }
+    await showImportPreview(items);
+  });
+}
+
+async function showImportPreview(items) {
+  const existing = await getAllExpenses();
+  const rows = items.map((it) => ({ it, dup: looksDuplicate(it, existing) }));
+  const amountHtml = (it) => (it.amountTWD != null ? 'NT$' + fmtMoney(it.amountTWD) : '')
+    + (it.amountUSD != null ? (it.amountTWD != null ? '<br>' : '') + '$' + fmtMoney(it.amountUSD) : '');
+
+  $('#modalRoot').innerHTML = `
+    <div class="modal-backdrop" id="modalBackdrop">
+      <div class="modal-sheet">
+        <h3>辨識到 ${rows.length} 筆</h3>
+        <p class="hint">勾選要匯入的項目；「可能重複」代表同一天已有相同金額的紀錄，預設不勾選。匯入後可逐筆點開修改細節。</p>
+        <div id="importList">
+          ${rows.map((r, i) => `
+            <label class="import-row ${r.dup ? 'dup' : ''}">
+              <input type="checkbox" data-i="${i}" ${r.dup ? '' : 'checked'}>
+              <div class="import-main">
+                <div class="exp-title">${escapeHtml(r.it.item || '(未命名)')}</div>
+                <div class="exp-meta">${escapeHtml(r.it.date)}　${escapeHtml(r.it.category)}　${escapeHtml(r.it.method || '付款方式待選')}${r.dup ? '　⚠️可能重複' : ''}</div>
+                <div class="exp-meta">${escapeHtml(r.it.note)}</div>
+              </div>
+              <div class="exp-amount">${amountHtml(r.it)}</div>
+            </label>`).join('')}
+        </div>
+        <div class="modal-actions">
+          <button class="cancel-btn" id="backBtn">返回</button>
+          <button class="save-btn" id="importBtnConfirm"></button>
+        </div>
+      </div>
+    </div>`;
+
+  const selected = () => [...document.querySelectorAll('#importList input:checked')].map((el) => rows[Number(el.dataset.i)].it);
+  const refreshCount = () => {
+    const n = selected().length;
+    const btn = $('#importBtnConfirm');
+    btn.textContent = `匯入 ${n} 筆`;
+    btn.disabled = n === 0;
+  };
+  refreshCount();
+  $('#importList').addEventListener('change', refreshCount);
+  $('#modalBackdrop').addEventListener('click', (e) => { if (e.target.id === 'modalBackdrop') closeModal(); });
+  $('#backBtn').addEventListener('click', openImportModal);
+  $('#importBtnConfirm').addEventListener('click', async () => {
+    const chosen = selected();
+    if (!chosen.length) return;
+    await addExpensesBatch(chosen);
+    importDraft = '';
+    closeModal();
+    showToast(`已匯入 ${chosen.length} 筆，請逐筆確認細節`);
+  });
+}
+
 /* ---------- settings ---------- */
 function wireSettings() {
   $('#syncUrlInput').value = state.syncUrl;
@@ -550,6 +734,7 @@ async function init() {
   wireSettings();
   wireTabs();
   $('#addFab').addEventListener('click', () => openExpenseModal(null));
+  $('#importBtn').addEventListener('click', openImportModal);
   $('#syncBadge').addEventListener('click', () => {
     if (state.syncUrl) runSync();
     else switchTab('tab-settings');

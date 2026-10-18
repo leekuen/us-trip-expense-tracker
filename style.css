@@ -230,6 +230,25 @@ body {
 .install-steps code { background: var(--accent-light); padding: 1px 5px; border-radius: 4px; }
 
 .danger-card { border-color: #f1c4be; }
+
+.import-steps { font-size: 13px; line-height: 1.7; padding-left: 18px; margin: 0 0 8px; }
+.import-link { display: block; text-align: center; text-decoration: none; }
+.howto textarea {
+  width: 100%; padding: 8px; border-radius: 8px; border: 1px solid var(--border);
+  font-size: 12px; margin-top: 6px;
+}
+.import-row {
+  display: flex; align-items: flex-start; gap: 8px; padding: 8px 0;
+  border-top: 1px dashed var(--border); cursor: pointer;
+}
+.import-row:first-child { border-top: none; }
+.import-row input { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; }
+.import-main { flex: 1; min-width: 0; }
+.import-main .exp-title { font-weight: 600; font-size: 14px; }
+.import-main .exp-meta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.import-row .exp-amount { text-align: right; font-weight: 700; white-space: nowrap; font-size: 13px; }
+.import-row.dup .exp-title { color: var(--pending); }
+.modal-actions button:disabled { opacity: 0.4; }
 .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
 .modal-actions button { flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px; }
 .modal-actions .save-btn { background: var(--accent); color: #fff; }

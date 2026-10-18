@@ -1,4 +1,4 @@
-const CACHE_NAME = 'us-expense-shell-v6';
+const CACHE_NAME = 'us-expense-shell-v7';
 const SHELL_FILES = ['./', './index.html', './style.css', './app.js', './manifest.json', './icon.svg'];
 
 self.addEventListener('install', (event) => {
