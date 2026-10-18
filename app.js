@@ -301,6 +301,7 @@ function normalizeRemoteDate(v) {
 }
 
 async function pullFromSheet() {
+  const fullPull = !state.lastPullTime;
   const res = await callSync('pull', { since: state.lastPullTime || '' });
   if (res.categories && res.categories.length) { state.categories = res.categories; await saveMeta('categories', res.categories); }
   if (res.methods && res.methods.length) { state.methods = res.methods; await saveMeta('methods', res.methods); }
@@ -329,6 +330,16 @@ async function pullFromSheet() {
         sheetRow: remote.row,
         syncStatus: 'synced',
       });
+    }
+  }
+  if (fullPull) {
+    // A full pull returns every row that exists in the sheet, so a synced
+    // local record whose row didn't come back no longer exists there (e.g.
+    // its row was deleted and later rows shifted up). Drop it so the phone
+    // matches the sheet; records with unsynced changes are left alone.
+    const seen = new Set(res.rows.filter((r) => !r.deleted).map((r) => r.row));
+    for (const r of await idbGetAll(STORE_EXPENSES)) {
+      if (r.sheetRow && r.syncStatus === 'synced' && !seen.has(r.sheetRow)) await idbDelete(STORE_EXPENSES, r.localId);
     }
   }
   state.lastPullTime = res.serverTime;
@@ -491,7 +502,7 @@ function wireSyncDiag() {
   });
   $('#fullResyncBtn').addEventListener('click', async () => {
     if (!state.syncUrl) { showToast('請先設定 Apps Script 網址'); return; }
-    if (!confirm('會重新從試算表抓取全部紀錄，已同步的紀錄以試算表內容為準（尚未同步的本機變更會保留）。確定嗎？')) return;
+    if (!confirm('會以試算表為準重建手機上的紀錄：已同步的紀錄改成跟試算表一致，試算表上已不存在的會從手機移除；尚未同步的本機變更會保留。確定嗎？')) return;
     state.lastPullTime = '';
     await saveMeta('lastPullTime', '');
     runSync();
