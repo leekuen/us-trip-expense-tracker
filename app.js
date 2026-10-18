@@ -536,6 +536,7 @@ function toAmount(v) {
 
 function buildImportPrompt() {
   const today = todayStr();
+  const richart = state.methods.find((m) => normOptionText(m).includes('richart')) || 'Richart card';
   return `我會附上一或多張消費截圖（信用卡通知、行動支付、收據、訂單截圖等）。請辨識每一筆「實際消費」，只輸出一個 JSON 陣列，不要輸出任何其他文字或說明。
 
 每筆物件的欄位：
@@ -550,10 +551,11 @@ function buildImportPrompt() {
 
 規則：
 1. 退款、轉帳、餘額、點數、廣告等非消費項目不要列入。
-2. 若截圖時間看起來是台灣時間（例如台灣銀行或信用卡 App 的通知），請換算成美東時間（America/New_York）再填 date 和 time，並在 note 寫「原截圖時間 台灣 yyyy-MM-dd HH:mm」。
-3. 同一筆消費在多張截圖重複出現時只列一次。
-4. 金額只填數字，不要幣別符號和千分位逗號。
-5. 不確定的欄位寧可填 "" 或 null，不要猜。`;
+2. date 和 time 一律照截圖上顯示的時間填（銀行顯示的是台灣時間），不要做任何時區換算或判斷。
+3. 若截圖是台新銀行（台新帳戶、Richart）的通知或交易明細，method 一律填「${richart}」，不用再判斷。
+4. 同一筆消費在多張截圖重複出現時只列一次。
+5. 金額只填數字，不要幣別符號和千分位逗號。
+6. 不確定的欄位寧可填 "" 或 null，不要猜。`;
 }
 
 function normalizeImportItem(o) {
