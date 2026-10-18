@@ -117,6 +117,7 @@ async function registerCustomOption(field, value) {
 async function pushPendingOptions() {
   if (!state.pendingOptions.length) return;
   const remaining = [];
+  const skippedOptions = [];
   const queue = state.pendingOptions;
   for (let i = 0; i < queue.length; i++) {
     const opt = queue[i];
@@ -125,6 +126,14 @@ async function pushPendingOptions() {
       await callSync('addOption', opt);
       delete state.syncErrors[key];
     } catch (e) {
+      // Errors that retrying can never fix (the sheet's dropdown isn't a plain
+      // list, column not found): drop the option instead of showing "待同步"
+      // forever. The value is already usable locally and in the sheet's cells.
+      if (e.server && /不是簡單清單型態|找不到欄位|缺少要新增的值/.test(e.message)) {
+        delete state.syncErrors[key];
+        skippedOptions.push(opt.value);
+        continue;
+      }
       console.error('addOption sync failed, will retry later', e);
       state.syncErrors[key] = { message: e.message, at: nowISO() };
       remaining.push(opt);
@@ -133,6 +142,9 @@ async function pushPendingOptions() {
   }
   state.pendingOptions = remaining;
   await saveMeta('pendingOptions', remaining);
+  if (skippedOptions.length) {
+    showToast('這些選項無法自動加進試算表的下拉選單（不影響記帳）：' + skippedOptions.join('、'));
+  }
 }
 
 /* ---------- expense CRUD (local-first) ---------- */
